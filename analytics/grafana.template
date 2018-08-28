@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: HA Rancher Cluster on AutoScaling Group
+Description: HA Grafana with MariaDB persistence and IAM permission for CloudWatch.
 Metadata:
-  DefaultName: Rancher
+  DefaultName: Grafana
   Dependencies:
     - TemplatePath: networking/private-subnets
       Resources:
@@ -20,7 +20,11 @@ Metadata:
       NestedDependency: networking/vpc
     - TemplatePath: analytics/logs-store
       Resources:
-        RawLogBucket: Raw
+        AccessLogBucket: Raw
+        CwlPolicy: LinuxLogPolicy
+      Outputs:
+        CwlLinuxParams: LxDockerLogParams
+        CwlDockerParams: DockerCwlParams
 Parameters:
   KeyPairName:
     Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
@@ -40,7 +44,7 @@ Parameters:
   DbInstanceTyp:
     Description: MariaDB server instance type
     Type: String
-    Default: db.t2.medium
+    Default: db.t2.micro
     AllowedValues:
       - db.t2.micro
       - db.t2.small
@@ -73,10 +77,11 @@ Parameters:
     Description: Subnet Group for hosting the MariaDB server.
     Type: String
   WebInstanceType:
-    Description: Phabricator server instance type
+    Description: Server instance type
     Type: String
-    Default: t2.medium
+    Default: t2.nano
     AllowedValues:
+      - t2.nano
       - t2.micro
       - t2.small
       - t2.medium
@@ -86,21 +91,22 @@ Parameters:
       - m4.xlarge
       - m4.2xlarge
     ConstraintDescription: must be a valid EC2 instance type.
-  RancherAmiId:
-    Type: String
+  BcUbuntuBaseAmiId:
+    Description: AWS AMI ID of Debian Jessie.
+    Type: 'AWS::EC2::Image::Id'
   VpcId:
     Description: VPCid associated with the subnets.
     Type: 'AWS::EC2::VPC::Id'
   HostedZoneName:
     Description: >-
-      Hosted Zone for the url (Without '.'). You need to fill in Subdomain as
-      well for custom domain to work.
+      Hosted Zone for the url (Without '.' at the end). You need to fill in
+      Subdomain as well for custom domain to work.
     Type: String
     Default: ''
   Subdomain:
     Description: >-
-      Subdomain (Without '.'). You need to fill in HostedZoneName as well for
-      custom domain to work.
+      Subdomain (Without '.'  at the end). You need to fill in HostedZoneName as
+      well for custom domain to work.
     Type: String
     Default: ''
   ElbSg:
@@ -118,13 +124,49 @@ Parameters:
   ServerSubnets:
     Description: VPCid associated with the subnets.
     Type: 'List<AWS::EC2::Subnet::Id>'
-  RawLogBucket:
-    Description: 'Elb Target Security Group. [logs-store.resources.Raw]'
+  MultiAzRds:
+    Description: Enable or disable failover for mariadb.
+    Type: String
+    Default: 'True'
+    AllowedValues:
+      - 'True'
+      - 'False'
+  GrafanaContainerImage:
+    Description: Dockerhub image name.
+    Type: String
+    Default: 'grafana/grafana:4.4.1'
+  SslRedirectContainerImage:
+    Description: ''
+    Type: String
+    Default: geldim/https-redirect
+  AccessLogBucket:
+    Description: S3 bucket for ELB access log.
+    Type: String
+  CwlUbuntuAgentDocker:
+    Description: Name of cluster. This is used for discovery.
+    Type: String
+    Default: 'bitclouded/aws-cwl-agent:4.1'
+  CwlLinuxParams:
+    Description: Environment variables for syslog and authlog cwl group names
+    Type: String
+  CwlDockerParams:
+    Description: Docker log driver params
+    Type: String
+  CertificateArn:
+    Description: ''
+    Type: String
+    Default: ''
+  CwlPolicy:
+    Description: Managed policy for linux logging.
     Type: String
 Conditions:
   HasDbSnapshot: !Not 
     - !Equals 
       - !Ref DbSnapshot
+      - ''
+  HasSsl: !Not 
+    - !Equals 
+      - !Ref CertificateArn
       - ''
   HasHostname: !And 
     - !Not 
@@ -166,15 +208,47 @@ Resources:
     Properties:
       VPCZoneIdentifier: !Ref ServerSubnets
       Tags:
-        - Value: Rancher Server
+        - Value: Grafana Server
           PropagateAtLaunch: true
           Key: Name
       LoadBalancerNames:
         - !Ref AdminGateway
-      MinSize: 3
+      MinSize: 2
       MaxSize: 5
       LaunchConfigurationName: !Ref AdminServerLc
     DependsOn: Database
+  ServerRoleIp:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref ServerRole
+      Path: /analytics/grafana/
+  ServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /analytics/grafana/
+      ManagedPolicyArns:
+        - !Ref CwlPolicy
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'cloudwatch:Describe*'
+                  - 'cloudwatch:Get*'
+                  - 'cloudwatch:List*'
+                Resource: '*'
   AdminServerLc:
     Type: 'AWS::AutoScaling::LaunchConfiguration'
     Properties:
@@ -185,120 +259,79 @@ Resources:
       SecurityGroups:
         - !Ref WebServerSg
         - !Ref ElbTargetSg
+      IamInstanceProfile: !Ref ServerRoleIp
       InstanceType: !Ref WebInstanceType
-      ImageId: !Ref RancherAmiId
+      ImageId: !Ref BcUbuntuBaseAmiId
       UserData: !Base64 
         'Fn::Sub': |
-          #cloud-config
-          rancher:
-            services:
-              rancher-server:
-                image: rancher/server
-                ports:
-                  - 8080:8080
-                  - 9345:9345
-                restart: always
-                command: [
-                  "--db-name","rancher",
-                  "--advertise-address","$private_ipv4",
-                  "--db-host","${Database.Endpoint.Address}",
-                  "--db-port","${Database.Endpoint.Port}",
-                  "--db-user","${DbUsername}",
-                  "--db-pass","${DbPassword}"
-                ]
+          #!/bin/bash
+          ECID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+          docker run -d --restart=always \
+            --name grafana --log-opt awslogs-stream=${AWS::StackName}/grafana/$ECID \
+            ${CwlLinuxParams} \
+            -p 3000:3000 \
+            -e GF_DATABASE_URL=mysql://${DbUsername}:${DbPassword}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/grafana \
+            -e GF_DATABASE_TYPE=MYSQL \
+            ${GrafanaContainerImage}
 
-  WorkerAsg:
-    Type: 'AWS::AutoScaling::AutoScalingGroup'
-    Properties:
-      VPCZoneIdentifier: !Ref ServerSubnets
-      Tags:
-        - Value: Rancher Node
-          PropagateAtLaunch: true
-          Key: Name
-      MinSize: '1'
-      MaxSize: '20'
-      LaunchConfigurationName: !Ref WorkerLc
-  WorkerLc:
-    Type: 'AWS::AutoScaling::LaunchConfiguration'
-    Properties:
-      KeyName: !If 
-        - HasNoKeypair
-        - !Ref 'AWS::NoValue'
-        - !Ref KeyPairName
-      SecurityGroups:
-        - !Ref WebServerSg
-      InstanceType: !Ref WebInstanceType
-      ImageId: !Ref RancherAmiId
-      UserData: !Base64
-        'Fn::Sub': |
-          #cloud-config
-          rancher:
-            services:
-              register:
-                priviledged: true
-                volumes:
-                - /var/run/docker.sock:/var/run/docker.sock
-                image: rancher/agent
-                command:
-                  - http://${AdminGateway.DNSName}
-    DependsOn: AdminAsg
+          docker run -d --restart=always \
+            --name sslredirect --log-opt awslogs-stream=${AWS::StackName}/sslredirect/$ECID \
+            ${CwlLinuxParams} \
+            -p 80:80 \
+            ${SslRedirectContainerImage}
+
   WebServerSg:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       SecurityGroupIngress: []
       VpcId: !Ref VpcId
-      GroupDescription: Security group for the RancherOS admin web servers
-  WebServerSgSelfIngress:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      GroupId: !Ref WebServerSg
-      IpProtocol: tcp
-      ToPort: '9345'
-      FromPort: '9345'
-      SourceSecurityGroupId: !Ref WebServerSg
+      GroupDescription: Security group for the Grafana web servers
   AdminGateway:
     Type: 'AWS::ElasticLoadBalancing::LoadBalancer'
     Properties:
       Subnets: !Ref ElbSubnets
       Scheme: !Ref AdminElbScheme
       Listeners:
-        - InstancePort: 8080
+        - InstancePort: !If 
+            - HasSsl
+            - 80
+            - 3000
           LoadBalancerPort: 80
           Protocol: tcp
           InstanceProtocol: tcp
+        - !If 
+          - HasSsl
+          - InstancePort: 3000
+            LoadBalancerPort: 443
+            Protocol: ssl
+            InstanceProtocol: tcp
+            SSLCertificateId: !Ref CertificateArn
+          - !Ref 'AWS::NoValue'
+      AccessLoggingPolicy:
+        EmitInterval: '5'
+        Enabled: 'true'
+        S3BucketName: !Ref AccessLogBucket
       SecurityGroups:
         - !Ref ElbSg
         - !Ref HttpSg
-      Policies:
-        - PolicyName: EnableProxyProtocol
-          InstancePorts:
-            - '8080'
-          PolicyType: ProxyProtocolPolicyType
-          Attributes:
-            - Name: ProxyProtocol
-              Value: 'true'
       HealthCheck:
         HealthyThreshold: 2
         Interval: 30
-        Target: 'HTTP:8080/ping'
+        Target: 'HTTP:3000/api/health'
         Timeout: 10
         UnhealthyThreshold: 5
       ConnectionDrainingPolicy:
         Enabled: 'true'
         Timeout: '60'
-      AccessLoggingPolicy:
-        EmitInterval: '5'
-        Enabled: 'true'
-        S3BucketName: !Ref RawLogBucket
   Database:
     Type: 'AWS::RDS::DBInstance'
     Properties:
       VPCSecurityGroups:
-        - !Ref RancherDbSg
+        - !Ref DbSg
       AllocatedStorage: !Ref DbStorageQuota
       DBInstanceClass: !Ref DbInstanceTyp
       DBParameterGroupName: !Ref DbParamGroup
-      DBName: rancher
+      DBName: grafana
       Engine: mariadb
       EngineVersion: 10.1.23
       MasterUsername: !Ref DbUsername
@@ -310,9 +343,9 @@ Resources:
       DBSubnetGroupName: !Ref DbSubnetGroup
       Tags:
         - Key: Name
-          Value: RancherOS Database
+          Value: Grafana Database
       StorageType: gp2
-      MultiAZ: 'true'
+      MultiAZ: !Ref MultiAzRds
     DeletionPolicy: Snapshot
   DbParamGroup:
     Type: 'AWS::RDS::DBParameterGroup'
@@ -320,7 +353,7 @@ Resources:
       Description: CloudFormation Sample Database Parameter Group
       Family: mariadb10.1
       Parameters: {}
-  RancherDbSg:
+  DbSg:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       SecurityGroupIngress:
@@ -329,13 +362,27 @@ Resources:
           FromPort: '3306'
           SourceSecurityGroupId: !Ref WebServerSg
       VpcId: !Ref VpcId
-      GroupDescription: RancherOS Database Security Group
+      GroupDescription: OS Database Security Group
 Outputs:
   AdminPanel:
-    Value: !Join 
-      - ''
-      - - 'http://'
-        - !GetAtt 
-          - AdminGateway
-          - DNSName
+    Value: !If 
+      - HasHostname
+      - !Join 
+        - ''
+        - - http
+          - !If 
+            - HasSsl
+            - s
+            - ''
+          - '://'
+          - !Ref Subdomain
+          - .
+          - !Ref HostedZoneName
+          - /
+      - !Join 
+        - ''
+        - - 'http://'
+          - !GetAtt 
+            - AdminGateway
+            - DNSName
     Description: Admin panel url.

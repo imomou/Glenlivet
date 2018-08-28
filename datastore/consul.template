@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: A Consul cluster based off an auto scaling group
+Metadata:
+  DefaultName: Consul
+  Dependencies:
+    - TemplatePath: networking/elb-subnets
+      Parameters:
+        VpcId: VpcId
+      Outputs:
+        ElbSubnets: ElbSubnets
+        WebServerSubnets: WebServerSubnets
+    - TemplatePath: analytics/logs-store
+      Resources:
+        AccessLogBucket: Raw
+        CwlPolicy: LinuxLogPolicy
+      Outputs:
+        CwlLinuxParams: LxDockerLogParams
+
+Parameters:
+  InstanceType:
+    Description: 'EC2 instance type (m3.medium, etc).'
+    Type: String
+    Default: t2.nano
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t2.xlarge
+      - t2.2xlarge
+      - m3.medium
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - r3.large
+      - r3.xlarge
+      - r3.2xlarge
+      - r3.4xlarge
+      - r3.8xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+  ClusterSize:
+    Default: '3'
+    MinValue: '3'
+    MaxValue: '9'
+    Description: Number of nodes in cluster (3-9).
+    Type: Number
+  ConsulContainer:
+    Type: String
+    Description: Consul container
+    Default: 'consul:1.0.0'
+  ContainerAwsUtil:
+    Description: Container image for awscli and cfn-signal
+    Type: String
+    Default: 'bitclouded/aws-util:2-1'
+  BcUbuntuBaseAmiId:
+    Type: String
+    Description: Latest AMI ID of Ubuntu
+  KeyPairName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: String
+    Default: ''
+  EncryptionKey:
+    Description: Serf encryption key to secure Consul cluster. Please generate a new one for production deployment.
+    Default: 'eYPfLO9PUhvYp10WTaqHng=='
+    Type: String
+
+  VpcId:
+    Description: 'ID of the VPC to provision the service in.'
+    Type: 'AWS::EC2::VPC::Id'
+  ElbSubnets:
+    Description: 'Subnets for the load balancers.'
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  WebServerSubnets:
+    Description: 'Subnets to run HA Consul cluster on.'
+    Type: 'List<AWS::EC2::Subnet::Id>'
+
+  AccessLogBucket:
+    Description: S3 bucket for ELB access log.
+    Type: String
+  CwlLinuxParams:
+    Description: Environment variables for syslog and authlog cwl group names
+    Type: String
+  CwlPolicy:
+    Description: Managed policy for linux logging.
+    Type: String
+
+Conditions:
+  HasNoKeypair: !Equals 
+    - !Ref KeyPairName
+    - ''
+
+Resources:
+  ConsulSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Consul SecurityGroup
+      VpcId: !Ref VpcId
+  SelfIngressOne:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ConsulSecurityGroup
+      IpProtocol: TCP
+      FromPort: '8300'
+      ToPort: '8302'
+      SourceSecurityGroupId: !Ref ConsulSecurityGroup
+  SelfIngressOneUdp:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ConsulSecurityGroup
+      IpProtocol: UDP
+      FromPort: '8301'
+      ToPort: '8302'
+      SourceSecurityGroupId: !Ref ConsulSecurityGroup
+  SelfIngressTwo:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ConsulSecurityGroup
+      IpProtocol: TCP
+      FromPort: '8400'
+      ToPort: '8400'
+      SourceSecurityGroupId: !Ref ConsulSecurityGroup
+  SelfIngressThree:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ConsulSecurityGroup
+      IpProtocol: TCP
+      FromPort: '8500'
+      ToPort: '8500'
+      SourceSecurityGroupId: !Ref ConsulSecurityGroup
+  SelfIngressFour:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ConsulSecurityGroup
+      IpProtocol: TCP
+      FromPort: '8600'
+      ToPort: '8600'
+      SourceSecurityGroupId: !Ref ConsulSecurityGroup
+  SelfIngressFourUdp:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref ConsulSecurityGroup
+      IpProtocol: UDP
+      FromPort: '8600'
+      ToPort: '8600'
+      SourceSecurityGroupId: !Ref ConsulSecurityGroup
+  ServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CLIROAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:Describe*'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'autoscaling:Describe*'
+                Resource: '*'
+      Path: /datastore/consul/
+      ManagedPolicyArns: [!Ref CwlPolicy]
+  ServerProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /datastore/consul/
+      Roles: [!Ref ServerRole]
+  ConsulServerAutoScale:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      VPCZoneIdentifier: !Ref WebServerSubnets
+      LaunchConfigurationName: !Ref ConsulServerLaunchConfig
+      MinSize: '3'
+      MaxSize: '9'
+      DesiredCapacity: !Ref ClusterSize
+      TargetGroupARNs: 
+        - !Ref AlbTargetGroupRpc
+        - !Ref AlbTargetGroupCli
+        - !Ref AlbTargetGroupUi
+      Tags:
+        - Key: Name
+          Value: 'Consul'
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: 3
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        WaitOnResourceSignals: 'true'
+        PauseTime: PT10M
+  ConsulServerLaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: !Ref BcUbuntuBaseAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasNoKeypair, !Ref 'AWS::NoValue', !Ref 'KeyPairName']
+      SecurityGroups: [!Ref ConsulSecurityGroup]
+      IamInstanceProfile: !Ref ServerProfile
+      UserData: !Base64
+        'Fn::Sub': |
+          #!/bin/bash
+          ECID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+          docker run --name consul -d --restart=always --net=host \
+            --log-opt awslogs-stream=${AWS::StackName}/consul/$ECID ${CwlLinuxParams} \
+            ${ConsulContainer} agent -server -node=$ECID \
+              -encrypt=${EncryptionKey} \
+              -client=0.0.0.0 -bind=0.0.0.0 -ui -bootstrap-expect=3 \
+              -advertise=$(curl http://169.254.169.254/latest/meta-data/local-ipv4) \
+              -retry-join "provider=aws tag_key=aws:cloudformation:stack-id tag_value=${AWS::StackId}"
+          docker run -t --rm ${ContainerAwsUtil} cfn-signal -e $? --stack ${AWS::StackName} --resource ConsulServerAutoScale --region ${AWS::Region}
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: 'true'
+
+  # TCP Load Balancer
+  Gateway:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Scheme: internal
+      Subnets: !Ref ElbSubnets
+      Type: network
+  AlbListenerRpc:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroupRpc
+      LoadBalancerArn: !Ref Gateway
+      Port: 8300
+      Protocol: TCP
+  AlbTargetGroupRpc:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthyThresholdCount: 10
+      Port: 8300
+      Protocol: TCP
+      UnhealthyThresholdCount: 10
+      VpcId: !Ref VpcId
+  AlbListenerCli:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroupCli
+      LoadBalancerArn: !Ref Gateway
+      Port: 8400
+      Protocol: TCP
+  AlbTargetGroupCli:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthyThresholdCount: 10
+      Port: 8400
+      Protocol: TCP
+      UnhealthyThresholdCount: 10
+      VpcId: !Ref VpcId
+  AlbListenerUi:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroupUi
+      LoadBalancerArn: !Ref Gateway
+      Port: 8500
+      Protocol: TCP
+  AlbTargetGroupUi:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthyThresholdCount: 10
+      Port: 8500
+      Protocol: TCP
+      UnhealthyThresholdCount: 10
+      VpcId: !Ref VpcId
+
+Outputs:
+  Gateway:
+    Value: !GetAtt Gateway.DNSName
