@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda setup base
+Parameters:
+  Environment:
+    Type: 'String'
+    AllowedValues:
+      - 'DevTest'
+      - 'Testing'
+      - 'Uat'
+      - 'Staging'
+      - 'Production'
+  HandlerFullNameSpace:
+    Type: 'String'
+  LamdaKeypath:
+    Type: 'String'
+    Default: 'code.zip'
+  LamdaCodeBucket:
+    Type: 'String'
+  LamdaCodeRuntime:
+    Type: 'String'
+    AllowedValues:
+      - 'dotnetcore2.0'
+      - 'go1.x'
+  RequireCwlSchedules:
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'false'
+  SubnetIds:
+    Type: 'List<String>'
+    Default: ''
+  VpcId:
+    Type: 'String'
+
+Conditions:
+  IsCwlScheduleRequired: !Equals 
+    - !Ref RequireCwlSchedules
+    - 'true'
+  IsInternal: !Not 
+    - !Equals 
+      - !Ref VpcId
+      - ''
+
+Resources:
+  PostingFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: !Ref HandlerFullNameSpace
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      Code:
+          S3Bucket: !Ref LamdaCodeBucket
+          S3Key: !Ref LamdaKeypath
+      Runtime: !Ref LamdaCodeRuntime
+      Environment:
+        Variables:
+            CFN_ENV: !Ref Environment
+      VpcConfig: !If
+        - IsInternal
+        - SecurityGroupIds: [!Ref LambdaSg]
+          SubnetIds: !Ref SubnetIds
+        - !Ref AWS::NoValue
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal:
+              Service: ["lambda.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: "lambda-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+            - Effect: !If 
+                - IsInternal
+                - Allow
+                - Deny
+              Action: ["ec2:CreateNetworkInterface","ec2:DescribeNetworkInterfaces","ec2:DeleteNetworkInterface"]
+              Resource: "*"
+
+  LambdaSg:
+    Type: 'AWS::EC2::SecurityGroup'
+    Condition: IsInternal
+    Properties:
+      GroupDescription: 'Lambda Security Group'
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: Lamda SecurityGroup 
+
+  PostingLambdaScheduledRule: 
+    Type: "AWS::Events::Rule"
+    Condition: IsCwlScheduleRequired
+    Properties:
+      Description: "ScheduledRule"
+      ScheduleExpression: "rate(6 hours)"
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: ["PostingFunction", "Arn"]
+          Id: "BroadcastFunctionSchedule"
+
+  PermissionForEventsToInvokeLambda: 
+    Type: "AWS::Lambda::Permission"
+    Condition: IsCwlScheduleRequired
+    Properties: 
+      FunctionName: 
+        Ref: "PostingFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: ["PostingLambdaScheduledRule", "Arn"]
+
+  LoggingPermissions:
+    Type: "AWS::IAM::Policy"
+    Properties: 
+      PolicyName: "loggingPermission"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogStreams'
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${PostingFunctionLog}*
+      Roles: [!Ref "LambdaRole"]
+
+  PostingFunctionLog:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      # log group name really is concatenated to match
+      # what the lambda function uses.
+      LogGroupName: !Sub '/aws/lambda/${PostingFunction}'
