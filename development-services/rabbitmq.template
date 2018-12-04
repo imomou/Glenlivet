@@ -85,7 +85,7 @@ Parameters:
   RabbitMqContainer:
     Description: Image of RabbitMQ.
     Type: String
-    Default: 'rabbitmq:3'
+    Default: 'rabbitmq:3-management'
   CwlUbuntuAgentDocker:
     Description: Name of cluster. This is used for discovery.
     Type: String
@@ -132,50 +132,28 @@ Resources:
     Properties:
       GroupDescription: RabbitMq SecurityGroup
       VpcId: !Ref VpcId
-  # RabbitMqGateway:
-  #   Type: 'AWS::ElasticLoadBalancing::LoadBalancer'
-  #   Properties:
-  #     Scheme: internal
-  #     Subnets: !Ref ElbSubnets
-  #     Listeners:
-  #       - InstancePort: 5672
-  #         LoadBalancerPort: 80
-  #         Protocol: tcp
-  #         InstanceProtocol: tcp
-  #     SecurityGroups:
-  #       - !Ref ElbSg
-  #       - !Ref HttpSg
-  #     HealthCheck:
-  #       HealthyThreshold: 2
-  #       Interval: 30
-  #       Target: 'HTTP:5672/'
-  #       Timeout: 10
-  #       UnhealthyThreshold: 5
-  #     ConnectionDrainingPolicy:
-  #       Enabled: 'true'
-  #       Timeout: '60'
   RabbitMqGateway:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
     Properties:
       Scheme: internal
       Subnets: !Ref ElbSubnets
       Type: network
-  RabbitMqbListenerRpc:
+  RabbitMqbListener:
     Type: 'AWS::ElasticLoadBalancingV2::Listener'
     Properties:
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref RabbitMqTargetGroupRpc
+          TargetGroupArn: !Ref RabbitMqTargetGroup
       LoadBalancerArn: !Ref RabbitMqGateway
-      Port: 5672
+      Port: 15672
       Protocol: TCP
-  RabbitMqTargetGroupRpc:
+  RabbitMqTargetGroup:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     Properties:
       HealthCheckIntervalSeconds: 30
       HealthCheckProtocol: TCP
       HealthyThresholdCount: 10
-      Port: 5672
+      Port: 15672
       Protocol: TCP
       UnhealthyThresholdCount: 10
       VpcId: !Ref VpcId
@@ -187,20 +165,18 @@ Resources:
       MinSize: !Ref MinCount
       MaxSize: !Ref MaxCount
       DesiredCapacity: !Ref DesiredSize
-      # LoadBalancerNames:
-      #   - !Ref RabbitMqGateway
       TargetGroupARNs: 
-        - !Ref RabbitMqTargetGroupRpc
+        - !Ref RabbitMqTargetGroup
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName} Rabbit Mq'
           PropagateAtLaunch: 'true'
       VPCZoneIdentifier: !Ref ServerSubnets
       LaunchConfigurationName: !Ref RabbitMqLc
-    # CreationPolicy:
-    #   ResourceSignal:
-    #     Count: 1
-    #     Timeout: PT10M
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
   RabbitMqLc:
     Type: 'AWS::AutoScaling::LaunchConfiguration'
     DependsOn: RabbitMqGateway
@@ -220,10 +196,10 @@ Resources:
             #!/bin/bash
             ECID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
             docker run --name rabbitmq -d --restart=always \
-            -e RABBITMQ_ERLANG_COOKIE=${RabbitCookie} RABBITMQ_DEFAULT_USER=${RabbitDefaultUser} -e RABBITMQ_DEFAULT_PASS=${RabbitDefaultPassword} \
-            -p 7000:7000 \
-            ${RabbitMqContainer}
-            #docker run -t --rm ${ContainerAwsUtil} cfn-signal -e $? --stack ${AWS::StackName} --resource RabbitMqAsg --region ${AWS::Region}
+              -e RABBITMQ_ERLANG_COOKIE=${RabbitCookie} -e RABBITMQ_DEFAULT_USER=${RabbitDefaultUser} -e RABBITMQ_DEFAULT_PASS=${RabbitDefaultPassword} \
+              -p 4369:4369 -p 5671-5672:5671-5671-5672 -p 25672:25672 -p 15672:15672 \
+              ${RabbitMqContainer} 
+            docker run -t --rm ${ContainerAwsUtil} cfn-signal -e $? --stack ${AWS::StackName} --resource RabbitMqAsg --region ${AWS::Region}           
   RabbitMQRole:
     Type: 'AWS::IAM::Role'
     Properties:
