@@ -1,0 +1,83 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  Macro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Description: Transform the original template performing a for loop that adds the requested number of Users resources.
+      FunctionName: !Ref MacroProcessor
+  MacroProcessor: 
+    Type: "AWS::Lambda::Function"
+    Properties: 
+      FunctionName: MacroProcessor
+      Runtime: "python3.6"
+      Description: IAM Users Macro processor function
+      Handler: "index.lambda_handler"
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+    
+          def lambda_handler(event, context):
+            
+            FinalFragment= event["fragment"]
+            print (FinalFragment["Parameters"])
+            
+            numberOfSns = FinalFragment["Parameters"]["Subscriptions"]
+            subscriptions = ""
+
+            for i in range(len(numberOfSns)):
+
+              subscriptions =
+               """QueueSubscription${Sns}:
+                Type: AWS::SNS::Subscription
+                Condition: IsSubscribedOneActive
+                Properties:
+                  Endpoint: !Sub ${SourceQueue.Arn}
+                  Protocol: sqs
+                  TopicArn: !Ref '${i}'"""
+         
+              FinalFragment["Resources"].update(Subscriptions)
+              FinalFragment["Resources"].update(NewUser)              
+              response = {}
+              response["requestId"] = event["requestId"]
+              response["status"] = "success"
+              response["fragment"] = FinalFragment
+              print (FinalFragment["Resources"])
+          return response
+      Timeout: "100"
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn 
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub MacroProcessor-lambda-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  LambdaPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub MacroProcessor-lambda-policy-${AWS::Region}
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action: "cloudformation:*"
+            Resource: "*"      
+          -
+            Effect: Allow
+            Action: "logs:*"
+            Resource: "*"      
+      Roles:
+        -
+          !Ref LambdaExecutionRole
