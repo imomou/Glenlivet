@@ -114,7 +114,7 @@ Parameters:
   RabbitDefaultPassword:
     Description: "Default Password"
     Type: "String"
-    MinLength: "10"
+    MinLength: "6"
     MaxLength: "20"
     Default: "P@ssw0rd1234!@#$"
     NoEcho: true
@@ -186,7 +186,6 @@ Resources:
       InstanceType: !Ref InstanceType
       SecurityGroups:
         - !Ref RabbitMqSecurityGroup
-        - !Ref ElbTargetSg
       KeyName: !If 
         - HasNoKeypair
         - !Ref 'AWS::NoValue'
