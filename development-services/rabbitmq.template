@@ -165,7 +165,7 @@ Resources:
     Properties:
       HealthCheckIntervalSeconds: 30
       HealthCheckProtocol: TCP
-      HealthyThresholdCount: 5
+      HealthyThresholdCount: 10
       Port: 15672
       Protocol: TCP
       UnhealthyThresholdCount: 10
