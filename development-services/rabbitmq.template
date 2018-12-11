@@ -113,15 +113,13 @@ Parameters:
     Default: "user"
   RabbitDefaultPassword:
     Description: "Default Password"
+    ConstraintDescription: Non Special Characters allowed
+    AllowedPattern: "[a-zA-Z0-9]*"
     Type: "String"
     MinLength: "6"
     MaxLength: "20"
     Default: "Password1234"
     NoEcho: true
-  VpcCidr:
-    Description: "Vpc Cidr"
-    Type: "String"
-    Default: "10.89.0.0/0"
 Conditions:
   # IsThreeAz: !Not 
   #   - !Equals 
@@ -138,11 +136,11 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: TCP
-          CidrIp: !Ref VpcCidr
+          CidrIp: 0.0.0.0/0
           FromPort: '1024'
           ToPort: '65535'
         - IpProtocol: TCP
-          CidrIp: !Ref VpcCidr
+          CidrIp: 0.0.0.0/0
           FromPort: '15672'
           ToPort: '15672'
   RabbitMqGateway:
