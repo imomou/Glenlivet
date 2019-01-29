@@ -139,10 +139,6 @@ Resources:
           CidrIp: 0.0.0.0/0
           FromPort: '1024'
           ToPort: '65535'
-        - IpProtocol: TCP
-          CidrIp: 0.0.0.0/0
-          FromPort: '15672'
-          ToPort: '15672'
   RabbitMqGateway:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
     Properties:
@@ -205,11 +201,26 @@ Resources:
           'Fn::Sub': |
             #!/bin/bash
             ECID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
-            docker run --name rabbitmq -d --restart=always \
-              -e RABBITMQ_ERLANG_COOKIE=${RabbitCookie} -e RABBITMQ_DEFAULT_USER=${RabbitDefaultUser} -e RABBITMQ_DEFAULT_PASS=${RabbitDefaultPassword} \
+            docker run --name rabbitmq -d --restart=always --net=host \
+              -e RABBITMQ_ERLANG_COOKIE=${RabbitCookie} \
+              -e RABBITMQ_DEFAULT_USER=${RabbitDefaultUser} \
+              -e RABBITMQ_DEFAULT_PASS=${RabbitDefaultPassword} \
               -p 4369:4369 -p 5671-5672:5671-5671-5672 -p 25672:25672 -p 15672:15672 \
               ${RabbitMqContainer} 
-            docker run -t --rm ${ContainerAwsUtil} cfn-signal -e $? --stack ${AWS::StackName} --resource RabbitMqAsg --region ${AWS::Region}           
+
+            docker exec -t rabbitmq /bin/bash -c \
+            "rabbitmq-plugins --offline enable rabbitmq_peer_discovery_aws; \
+            echo \
+            \"log.console.level=debug
+            cluster_formation.peer_discovery_backend=rabbit_peer_discovery_aws
+            cluster_formation.aws.region=${AWS::Region} 
+            cluster_formation.aws.use_autoscaling_group=true  
+            cluster_formation.aws.use_private_ip=true 
+            \" >> /etc/rabbitmq/rabbitmq.conf; cat /etc/rabbitmq/rabbitmq.conf;
+            rabbitmqctl stop_app; rabbitmqctl reset; rabbitmqctl start_app
+            "
+                         
+            #docker run -t --rm ${ContainerAwsUtil} cfn-signal -e $? --stack ${AWS::StackName} --resource RabbitMqAsg --region ${AWS::Region}           
   RabbitMQRole:
     Type: 'AWS::IAM::Role'
     Properties:
