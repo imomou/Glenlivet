@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: 'AWS::Serverless-2016-10-31'
+Metadata:
+  DefaultName: lambda alexa
+Description: Simple Alexa template
+Parameters:
+  Environment:
+    Type: 'String'
+    AllowedValues:
+      - 'DevTest'
+      - 'Testing'
+      - 'Uat'
+      - 'Staging'
+      - 'Production'
+    Default: DevTest
+  AlexaSkillEvent:
+    Type: 'String'
+
+#Conditions:
+Resources:
+  AlexaFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      Handler: lib/index
+      Role: !GetAtt LambdaRole.Arn
+      InlineCode: exports.handler = function(event, context) { };
+      Runtime: nodejs6.10
+      Events:
+      AlexaSkillEvent:
+          Type: AlexaSkill
+          AppId: !Ref AlexaSkillEvent
+          Enabled: True
+  AlexaFunctionFunctionPermission:
+      Type: AWS::Lambda::Permission
+      DependsOn: AlexaFunction
+      Properties:
+          Action: lambda:InvokeFunction
+          EventSourceToken: !Ref AlexaSkillEvent
+          FunctionName: !GetAtt AlexaFunction.Arn
+          Principal: alexa-appkit.amazon.com
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies: 
+      - PolicyName: "param-store"
+        PolicyDocument: 
+          Version: "2012-10-17"
+          Statement: 
+            - Effect: 'Allow'
+              Action:
+                - 'lambda:InvokeAsync'
+                - 'lambda:InvokeFunction'
+              Resource: '*'
+            - Effect: 'Allow'
+              Action: 
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:DescribeLogStreams'
+              Resource: '*'
+  AlexaFunctionLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AlexaFunction}'
+
+#Outputs:
+  
+
