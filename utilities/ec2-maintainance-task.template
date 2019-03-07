@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: scheduledjob
+Metadata:
+  DefaultName: dsf
+  Dependencies:
+    - TemplatePath: analytics/logs-store
+      Resources:
+        AccessLogBucket: Raw
+        CwlPolicy: LinuxLogPolicy
+      Outputs:
+        CwlLinuxParams: LxDockerLogParams
+Parameters:
+  ScheduleRate:
+    Type: String
+    Default: rate(1 days)
+  TargetCfnStacks:
+    Type: String
+  S3AccessLogBucketName:
+    Description: Name of bucket for aws s3 access logs.
+    Type: String
+  Command:
+    Type: String
+    Default: docker system prune -f
+Resources:
+
+  MaintenanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      Name: !Sub '${AWS::StackName}-MaintenanceWindow'
+      AllowUnassociatedTargets: false
+      Cutoff: 1
+      Schedule: !Ref ScheduleRate
+      Duration: 2
+  MaintenanceWindowTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      WindowId: !Ref MaintenanceWindow
+      ResourceType: INSTANCE
+      Targets:
+        - Key: tag:aws:cloudformation:stack-name
+          Values: 
+          - !Ref TargetCfnStacks
+  MaintenanceWindowTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      Description: asd
+      ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
+      MaxErrors: 1
+      TaskArn: AWS-RunShellScript
+      MaxConcurrency: 100%
+      WindowId: !Ref MaintenanceWindow
+      Priority: 1
+      TaskType: RUN_COMMAND
+      TaskInvocationParameters:
+        MaintenanceWindowRunCommandParameters:
+          Comment: Runs command
+          TimeoutSeconds: 600
+          Parameters: {"commands":[!Ref Command]}
+          OutputS3BucketName: !Ref MaintenanceBucket
+      Targets:
+        - Key: WindowTargetIds
+          Values: 
+          - !Ref MaintenanceWindowTarget
+
+  MaintenanceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogBucketName
+        LogFilePrefix: !Join 
+          - ''
+          - - !Ref 'AWS::StackName'
+            - '-MaintenanceBucket/'
+
+  MaintenanceWindowServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole
+      Policies:
+        - PolicyName: PassRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - '*'
