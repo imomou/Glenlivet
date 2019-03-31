@@ -14,7 +14,7 @@ Parameters:
     Type: String
     Default: rate(1 days)
   TargetCfnStacks:
-    Type: String
+    Type: List<String>
   S3AccessLogBucketName:
     Description: Name of bucket for aws s3 access logs.
     Type: String
@@ -38,8 +38,7 @@ Resources:
       ResourceType: INSTANCE
       Targets:
         - Key: tag:aws:cloudformation:stack-name
-          Values: 
-          - !Ref TargetCfnStacks
+          Values: !Ref TargetCfnStacks
   MaintenanceWindowTask:
     Type: AWS::SSM::MaintenanceWindowTask
     Properties:
