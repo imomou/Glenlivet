@@ -11,6 +11,14 @@ Parameters:
       - Six_Hours
       - Twelve_Hours
       - TwentyFour_Hours
+  GuardDutyFindingsDeliveryFrequency:
+    Description: ''
+    Default: FIFTEEN_MINUTES
+    Type: String
+    AllowedValues:
+      - FIFTEEN_MINUTES
+      - ONE_HOUR
+      - SIX_HOURS
   CwlUbuntuAgentDocker:
     Description: Name tag of log shipping agent container.
     Type: String
@@ -513,6 +521,14 @@ Resources:
                 Resource: !GetAtt 
                   - VpcTrafficLog
                   - Arn
+  WindowsEventLog:
+    DependsOn:
+      - LogStream
+      - LogStreamRole
+      - LogStreamRolePolicy
+      - AccessS3LogBucketPolicy
+    Type: 'AWS::Logs::LogGroup'
+    Properties: {}
   LxSysLog:
     DependsOn:
       - LogStream
@@ -635,6 +651,7 @@ Resources:
               - !GetAtt LxSysLog.Arn
               - !GetAtt LxAuthLog.Arn
               - !GetAtt LxDockerLog.Arn
+              - !GetAtt WindowsEventLog.Arn
           - Sid: SessionManager
             Effect: Allow
             Action:
@@ -644,6 +661,11 @@ Resources:
               - 'ssmmessages:OpenDataChannel'
               - 's3:GetEncryptionConfiguration'
             Resource: ['*']
+          - Sid: SsmParameter
+            Effect: Allow
+            Action:
+              - 'ssm:GetParameter'
+            Resource: ['arn:aws:ssm:*:*:parameter/AmazonCloudWatch-*']
   LogStream:
     Type: 'AWS::Kinesis::Stream'
     Properties:
@@ -743,33 +765,48 @@ Resources:
               - !Ref BillingNotification
       Topics:
         - !Ref BillingNotification                         
-  LinuxMemoryAndLogShiping:
+  NewInstanceConfiguration:
     Type: "AWS::SSM::Document"
     Properties: 
       DocumentType: Command
       Content: 
-        schemaVersion: "2.0"
-        description: "Send memory metrics to cloudwatch custom metrics. Send syslog and authlog to cloudwatch logs."
+        schemaVersion: "2.2"
+        description: "Set up new instance, i.e. cloud watch agent configuration"
         mainSteps:
+          - action: aws:runPowerShellScript
+            name: "WindowsCloudWatchAgentSetupScript"
+            precondition:
+              StringEquals: 
+                - "platformType"
+                - "Windows"
+            inputs:
+              runCommand: 
+                - !Sub .'C:\Program Files\Amazon\AmazonCloudWatchAgent\configureCloudWatch.ps1' ${WindowsEventLog}
           - action: "aws:runShellScript"
-            name: "LaunchLogAgent"
+            name: "LinuxCloudWatchAgentSetupScript"
+            precondition:
+              StringEquals: 
+                - "platformType"
+                - "Linux"
             inputs:
               runCommand: 
                 - !Sub |
-                  ECID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
-                  STACK_NAME=$(aws ec2 describe-tags \
-                    --filters "Name=resource-id,Values=$ECID" "Name=key,Values=aws:cloudformation:stack-name" \
-                    --region=${AWS::Region} --output=text | cut -f5)
-                  docker run -d --restart=always \
-                    -v /var/log:/var/log-host:ro \
-                    --name cwlagent \
-                    --log-opt awslogs-stream=$STACK_NAME/cwlagent/$ECID \
-                    --log-opt awslogs-group=${LxDockerLog} \
-                    --log-driver=awslogs \
-                    -e SYSLOG=${LxSysLog} -e AUTHLOG=${LxAuthLog} \
-                    ${CwlUbuntuAgentDocker}
-                  docker run -d --restart=always --name cwlcron ${CwlUbuntuAgentDocker} cron
+                  
+                  
+                  cd /opt/aws/amazon-cloudwatch-agent/bin/
+
+                  echo Replace log group names...
+                  sudo sed -i 's/{LxAuthLog}/${LxAuthLog}/g' linux-agent-config.json
+                  sudo sed -i 's/{LxSysLog}/${LxSysLog}/g' linux-agent-config.json
+
+                  echo Configure CWA...
+                  sudo amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:linux-agent-config.json -s
+
           - action: "aws:runShellScript"
+            precondition:
+              StringEquals: 
+                - "platformType"
+                - "Linux"
             name: "InstallInspector"
             inputs:
               runCommand: 
@@ -778,7 +815,7 @@ Resources:
   BcTemplatesAssociation:
     Type: "AWS::SSM::Association"
     Properties: 
-      Name: !Ref LinuxMemoryAndLogShiping
+      Name: !Ref NewInstanceConfiguration
       Targets:
         - Key: "tag:bc:template-name"
           Values:
@@ -787,6 +824,11 @@ Resources:
             - analytics/snowplow
             - datastore/elasticsearch
             - platforms/ecs-base
+  GuardDuty:
+    Type: AWS::GuardDuty::Detector
+    Properties:
+      Enable: true
+      FindingPublishingFrequency: !Ref GuardDutyFindingsDeliveryFrequency  
 Outputs:
   LxDockerLogParams:
     Value: !Join 
