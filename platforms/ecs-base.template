@@ -99,16 +99,29 @@ Parameters:
     Default: 60
     Type: Number
 
+  #SSM
+  SsmScheduleRate:
+    Description: The schedule of the maintenance window in the form of a cron or rate expression. 
+    Type: String
+    Default: rate(1 days)
+  SsmLinuxCmmand:
+    Description: Command to run on Linux Clusters
+    Type: String
+    Default: ''
+  SsmWindowsCmmand:
+    Description: Command to run on Windows Clusters
+    Type: String
+    Default: ''
+
 Conditions:
-  IsThreeAz: !Equals 
-    - !Ref AzCount
-    - '3'
-  HasNoKeypair: !Equals 
-    - !Ref KeyPairName
-    - ''
-  IsLambdaBucketParamEmpty: !Equals
-    - !Ref LambdaBucket
-    - ''
+  IsThreeAz: !Equals [!Ref AzCount, 3] 
+  HasNoKeypair: !Equals [!Ref KeyPairName, '']
+  IsLambdaBucketParamEmpty: !Equals [!Ref LambdaBucket, '']
+  HasSsmCommand: !Not
+    - !Equals [!Ref SsmLinuxCmmand, '']
+  HasWindowsCommand: !Not
+    - !Equals [!Ref SsmWindowsCmmand, '']
+  HasAnySsmCommand: !Or [!Condition HasSsmCommand, !Condition HasWindowsCommand]
 Resources:
   SharedDiskGp:
     Type: 'AWS::EFS::FileSystem'
@@ -563,6 +576,103 @@ Resources:
                   - 'ecs:RunTask'
                 Resource: '*'
 
+  # Maintenance Window to be run on ec2 instances under ecs
+  MaintenanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Condition: HasAnySsmCommand
+    Properties:
+      Name: !Sub '${AWS::StackName}-MaintenanceWindow'
+      AllowUnassociatedTargets: false
+      Cutoff: 23
+      Schedule: !Ref SsmScheduleRate
+      Duration: 1
+  MaintenanceWindowTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Condition: HasAnySsmCommand
+    Properties:
+      WindowId: !Ref MaintenanceWindow
+      ResourceType: INSTANCE
+      Targets:
+        - Key: tag:aws:cloudformation:stack-name
+          Values: !Sub '${AWS::StackName}'
+  MaintenanceWindowTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Condition: HasWindowsCommand
+    Properties:
+      Description: Scheduled Taask for Windows
+      ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
+      MaxErrors: 1
+      TaskArn: AWS-RunPowerShellScript
+      MaxConcurrency: 100%
+      WindowId: !Ref MaintenanceWindow
+      Priority: 1
+      TaskType: RUN_COMMAND
+      TaskInvocationParameters:
+        MaintenanceWindowRunCommandParameters:
+          Comment: Runs command
+          TimeoutSeconds: 600
+          Parameters: {"commands":[!Ref SsmWindowsCmmand]}
+          OutputS3BucketName: !Ref MaintenanceBucket
+      Targets:
+        - Key: WindowTargetIds
+          Values: 
+          - !Ref MaintenanceWindowTarget
+  MaintenanceLinuxTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Condition: HasSsmCommand
+    Properties:
+      Description: Scheduled Taask for Linux
+      ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
+      MaxErrors: 1
+      TaskArn: AWS-RunShellScript
+      MaxConcurrency: 100%
+      WindowId: !Ref MaintenanceWindow
+      Priority: 1
+      TaskType: RUN_COMMAND
+      TaskInvocationParameters:
+        MaintenanceWindowRunCommandParameters:
+          Comment: Runs command
+          TimeoutSeconds: 600
+          Parameters: {"commands":[!Ref SsmLinuxCmmand]}
+          OutputS3BucketName: !Ref MaintenanceBucket
+      Targets:
+        - Key: WindowTargetIds
+          Values: 
+          - !Ref MaintenanceWindowTarget
+
+  MaintenanceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogBucketName
+        LogFilePrefix: !Sub '${AWS::StackName}-MaintenanceBucket/'
+
+  MaintenanceWindowServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole
+      Policies:
+        - PolicyName: PassRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - '*'
 Outputs:
   EcsAdminUrl:
     Description: Ec2 Container Service Cluster
