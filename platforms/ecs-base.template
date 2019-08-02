@@ -17,6 +17,9 @@ Metadata:
     - TemplatePath: analytics/logs-store
       Resources:
         DiagnosticsMp: LinuxLogPolicy
+    - TemplatePath: analytics/logs-store
+      Resources:
+        S3AccessLogBucketName: AccessS3Log        
 Parameters:
   KeyPairName:
     Type: String
@@ -39,12 +42,12 @@ Parameters:
   InstanceType:
     Description: Phabricator server instance type
     Type: String
-    Default: t2.medium
+    Default: t3.medium
     AllowedValues:
-      - t2.micro
-      - t2.small
-      - t2.medium
-      - t2.large
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
       - m5.large
       - m5.xlarge
       - m5.2xlarge
@@ -92,6 +95,9 @@ Parameters:
     Description: 'AWS ECS Agent Name'
     Type: String
     Default: v1.26.0
+  S3AccessLogBucketName:
+    Description: Name of bucket for aws s3 access logs.
+    Type: String    
 
   # Scaling Parameters
   EcsCpuReservationTrackingTarget:
@@ -103,25 +109,28 @@ Parameters:
   SsmScheduleRate:
     Description: The schedule of the maintenance window in the form of a cron or rate expression. 
     Type: String
-    Default: rate(1 days)
+    Default: rate(7 days)
+    AllowedValues:
+    - rate(1 days)
+    - rate(2 days)
+    - rate(3 days)
+    - rate(4 days)
+    - rate(5 days)
+    - rate(6 days)
+    - rate(7 days)
   SsmLinuxCmmand:
     Description: Command to run on Linux Clusters
     Type: String
-    Default: ''
+    Default: 'docker system prune -f'
   SsmWindowsCmmand:
     Description: Command to run on Windows Clusters
     Type: String
-    Default: ''
+    Default: 'docker system prune -f'
 
 Conditions:
   IsThreeAz: !Equals [!Ref AzCount, 3] 
   HasNoKeypair: !Equals [!Ref KeyPairName, '']
   IsLambdaBucketParamEmpty: !Equals [!Ref LambdaBucket, '']
-  HasSsmCommand: !Not
-    - !Equals [!Ref SsmLinuxCmmand, '']
-  HasWindowsCommand: !Not
-    - !Equals [!Ref SsmWindowsCmmand, '']
-  HasAnySsmCommand: !Or [!Condition HasSsmCommand, !Condition HasWindowsCommand]
 Resources:
   SharedDiskGp:
     Type: 'AWS::EFS::FileSystem'
@@ -579,25 +588,30 @@ Resources:
   # Maintenance Window to be run on ec2 instances under ecs
   MaintenanceWindow:
     Type: AWS::SSM::MaintenanceWindow
-    Condition: HasAnySsmCommand
     Properties:
       Name: !Sub '${AWS::StackName}-MaintenanceWindow'
       AllowUnassociatedTargets: false
-      Cutoff: 23
+      Cutoff: 0
       Schedule: !Ref SsmScheduleRate
       Duration: 1
-  MaintenanceWindowTarget:
+  MaintenanceWindowTargetLinux:
     Type: AWS::SSM::MaintenanceWindowTarget
-    Condition: HasAnySsmCommand
     Properties:
       WindowId: !Ref MaintenanceWindow
       ResourceType: INSTANCE
       Targets:
-        - Key: tag:aws:cloudformation:stack-name
-          Values: !Sub '${AWS::StackName}'
+        - Key: tag:Name
+          Values: [ !Sub '${AWS::StackName} Linux Agent' ]      
+  MaintenanceWindowTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      WindowId: !Ref MaintenanceWindow
+      ResourceType: INSTANCE
+      Targets:
+        - Key: tag:Name
+          Values: [ !Sub '${AWS::StackName} Windows Agent' ]
   MaintenanceWindowTask:
     Type: AWS::SSM::MaintenanceWindowTask
-    Condition: HasWindowsCommand
     Properties:
       Description: Scheduled Taask for Windows
       ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
@@ -611,15 +625,13 @@ Resources:
         MaintenanceWindowRunCommandParameters:
           Comment: Runs command
           TimeoutSeconds: 600
-          Parameters: {"commands":[!Ref SsmWindowsCmmand]}
+          Parameters: {"commands":[ !Ref SsmWindowsCmmand ]}
           OutputS3BucketName: !Ref MaintenanceBucket
       Targets:
         - Key: WindowTargetIds
-          Values: 
-          - !Ref MaintenanceWindowTarget
+          Values: [ !Ref 'MaintenanceWindowTarget' ]
   MaintenanceLinuxTask:
     Type: AWS::SSM::MaintenanceWindowTask
-    Condition: HasSsmCommand
     Properties:
       Description: Scheduled Taask for Linux
       ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
@@ -633,13 +645,11 @@ Resources:
         MaintenanceWindowRunCommandParameters:
           Comment: Runs command
           TimeoutSeconds: 600
-          Parameters: {"commands":[!Ref SsmLinuxCmmand]}
+          Parameters: {"commands":[ !Ref SsmLinuxCmmand ]}
           OutputS3BucketName: !Ref MaintenanceBucket
       Targets:
         - Key: WindowTargetIds
-          Values: 
-          - !Ref MaintenanceWindowTarget
-
+          Values: [ !Ref 'MaintenanceWindowTargetLinux' ]
   MaintenanceBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -647,7 +657,6 @@ Resources:
       LoggingConfiguration:
         DestinationBucketName: !Ref S3AccessLogBucketName
         LogFilePrefix: !Sub '${AWS::StackName}-MaintenanceBucket/'
-
   MaintenanceWindowServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -656,23 +665,18 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service:
-                - ssm.amazonaws.com
-            Action:
-              - sts:AssumeRole
+              Service: [ 'ssm.amazonaws.com' ]
+            Action: [ 'sts:AssumeRole' ]
       Path: /
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole
+      ManagedPolicyArns: [ 'arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole' ]
       Policies:
         - PolicyName: PassRole
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action:
-                  - iam:PassRole
-                Resource:
-                  - '*'
+                Action: [ 'iam:PassRole' ]
+                Resource: [ '*' ]
 Outputs:
   EcsAdminUrl:
     Description: Ec2 Container Service Cluster
