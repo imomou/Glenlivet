@@ -110,14 +110,6 @@ Parameters:
     Description: The schedule of the maintenance window in the form of a cron or rate expression. 
     Type: String
     Default: rate(7 days)
-    AllowedValues:
-    - rate(1 days)
-    - rate(2 days)
-    - rate(3 days)
-    - rate(4 days)
-    - rate(5 days)
-    - rate(6 days)
-    - rate(7 days)
   SsmLinuxCmmand:
     Description: Command to run on Linux Clusters
     Type: String
