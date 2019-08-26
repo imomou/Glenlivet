@@ -19,7 +19,7 @@ Metadata:
         DiagnosticsMp: LinuxLogPolicy
     - TemplatePath: analytics/logs-store
       Resources:
-        S3AccessLogBucketName: AccessS3Log        
+        S3AccessLogBucketName: AccessS3Log
 Parameters:
   KeyPairName:
     Type: String
@@ -42,12 +42,12 @@ Parameters:
   InstanceType:
     Description: Phabricator server instance type
     Type: String
-    Default: t3.medium
+    Default: t2.medium
     AllowedValues:
-      - t3.micro
-      - t3.small
-      - t3.medium
-      - t3.large
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
       - m5.large
       - m5.xlarge
       - m5.2xlarge
@@ -97,7 +97,7 @@ Parameters:
     Default: v1.26.0
   S3AccessLogBucketName:
     Description: Name of bucket for aws s3 access logs.
-    Type: String    
+    Type: String
 
   # Scaling Parameters
   EcsCpuReservationTrackingTarget:
@@ -109,7 +109,7 @@ Parameters:
   SsmScheduleRate:
     Description: The schedule of the maintenance window in the form of a cron or rate expression. 
     Type: String
-    Default: rate(7 days)
+    Default: ''
   SsmLinuxCmmand:
     Description: Command to run on Linux Clusters
     Type: String
@@ -123,6 +123,8 @@ Conditions:
   IsThreeAz: !Equals [!Ref AzCount, 3] 
   HasNoKeypair: !Equals [!Ref KeyPairName, '']
   IsLambdaBucketParamEmpty: !Equals [!Ref LambdaBucket, '']
+  HasSsmSchedules: !Not
+    - !Equals [!Ref SsmScheduleRate, '']
 Resources:
   SharedDiskGp:
     Type: 'AWS::EFS::FileSystem'
@@ -374,15 +376,11 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          -
-            Effect: "Allow"
+          - Effect: "Allow"
             Principal:
-              Service:
-                - "autoscaling.amazonaws.com"
-            Action:
-              - "sts:AssumeRole"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole
+              Service: ["autoscaling.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole"]
       Path: "/"
   ScalingEvents:
     Type: "AWS::SNS::Topic"
@@ -440,12 +438,9 @@ Resources:
         Statement:
           - Effect: "Allow"
             Principal:
-              Service:
-                - "lambda.amazonaws.com"
-            Action:
-              - "sts:AssumeRole"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole
+              Service: ["lambda.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole"]
       Path: "/"
   LambdaInvokePermission:
     Type: "AWS::Lambda::Permission"
@@ -580,6 +575,7 @@ Resources:
   # Maintenance Window to be run on ec2 instances under ecs
   MaintenanceWindow:
     Type: AWS::SSM::MaintenanceWindow
+    Condition: HasSsmSchedules
     Properties:
       Name: !Sub '${AWS::StackName}-MaintenanceWindow'
       AllowUnassociatedTargets: false
@@ -588,62 +584,71 @@ Resources:
       Duration: 1
   MaintenanceWindowTargetLinux:
     Type: AWS::SSM::MaintenanceWindowTarget
+    Condition: HasSsmSchedules
     Properties:
       WindowId: !Ref MaintenanceWindow
       ResourceType: INSTANCE
       Targets:
-        - Key: tag:Name
-          Values: [ !Sub '${AWS::StackName} Linux Agent' ]      
+        - Key: 'tag:aws:autoscaling:groupName'
+          Values: [!Ref EcsAutoScalingGroup]
+        - Key: 'tag:aws:cloudformation:stack-id'
+          Values: [!Ref 'AWS::StackId'] 
   MaintenanceWindowTarget:
     Type: AWS::SSM::MaintenanceWindowTarget
+    Condition: HasSsmSchedules
     Properties:
       WindowId: !Ref MaintenanceWindow
       ResourceType: INSTANCE
       Targets:
-        - Key: tag:Name
-          Values: [ !Sub '${AWS::StackName} Windows Agent' ]
+        - Key: 'tag:aws:autoscaling:groupName'
+          Values: [!Ref WindowsAgentGroups]
+        - Key: 'tag:aws:cloudformation:stack-id'
+          Values: [!Ref 'AWS::StackId'] 
   MaintenanceWindowTask:
     Type: AWS::SSM::MaintenanceWindowTask
+    Condition: HasSsmSchedules
     Properties:
-      Description: Scheduled Taask for Windows
+      Description: Scheduled Task for Windows
       ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
-      MaxErrors: 1
+      MaxErrors: 10
       TaskArn: AWS-RunPowerShellScript
       MaxConcurrency: 100%
       WindowId: !Ref MaintenanceWindow
-      Priority: 1
+      Priority: 500
       TaskType: RUN_COMMAND
       TaskInvocationParameters:
         MaintenanceWindowRunCommandParameters:
-          Comment: Runs command
+          Comment: !Sub 'The command will be run on ${WindowsAgentGroups}'
           TimeoutSeconds: 600
-          Parameters: {"commands":[ !Ref SsmWindowsCmmand ]}
+          Parameters: {"commands":[!Ref SsmWindowsCmmand]}
           OutputS3BucketName: !Ref MaintenanceBucket
       Targets:
         - Key: WindowTargetIds
-          Values: [ !Ref 'MaintenanceWindowTarget' ]
+          Values: [!Ref 'MaintenanceWindowTarget']
   MaintenanceLinuxTask:
     Type: AWS::SSM::MaintenanceWindowTask
+    Condition: HasSsmSchedules
     Properties:
-      Description: Scheduled Taask for Linux
+      Description: Scheduled Task for Linux
       ServiceRoleArn: !GetAtt MaintenanceWindowServiceRole.Arn
-      MaxErrors: 1
+      MaxErrors: 10
       TaskArn: AWS-RunShellScript
       MaxConcurrency: 100%
       WindowId: !Ref MaintenanceWindow
-      Priority: 1
+      Priority: 501
       TaskType: RUN_COMMAND
       TaskInvocationParameters:
         MaintenanceWindowRunCommandParameters:
-          Comment: Runs command
+          Comment: !Sub 'The command will be run on ${EcsAutoScalingGroup}'
           TimeoutSeconds: 600
-          Parameters: {"commands":[ !Ref SsmLinuxCmmand ]}
+          Parameters: {"commands":[!Ref SsmLinuxCmmand]}
           OutputS3BucketName: !Ref MaintenanceBucket
       Targets:
         - Key: WindowTargetIds
-          Values: [ !Ref 'MaintenanceWindowTargetLinux' ]
+          Values: [!Ref 'MaintenanceWindowTargetLinux']
   MaintenanceBucket:
     Type: AWS::S3::Bucket
+    Condition: HasSsmSchedules
     DeletionPolicy: Retain
     Properties:
       LoggingConfiguration:
@@ -651,24 +656,25 @@ Resources:
         LogFilePrefix: !Sub '${AWS::StackName}-MaintenanceBucket/'
   MaintenanceWindowServiceRole:
     Type: AWS::IAM::Role
+    Condition: HasSsmSchedules
     Properties:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
-              Service: [ 'ssm.amazonaws.com' ]
-            Action: [ 'sts:AssumeRole' ]
-      Path: /
-      ManagedPolicyArns: [ 'arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole' ]
+              Service: ['ssm.amazonaws.com']
+            Action: ['sts:AssumeRole']
+      Path: /platforms/ecs-base/
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole']
       Policies:
         - PolicyName: PassRole
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action: [ 'iam:PassRole' ]
-                Resource: [ '*' ]
+                Action: ['iam:PassRole']
+                Resource: ['*']
 Outputs:
   EcsAdminUrl:
     Description: Ec2 Container Service Cluster
